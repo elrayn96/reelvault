@@ -1,0 +1,6 @@
+{
+  "name": "ReelVault",
+  "description": "Securely download Instagram media, including Reels, Posts, Stories, and Carousels instantly with compression options.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
