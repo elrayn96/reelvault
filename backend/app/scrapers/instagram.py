@@ -125,6 +125,142 @@ class InstagramScraper:
             print(f"Instaloader failed with error: {e}. Moving to standard fallback custom scraping scraper...")
             raise e
 
+    def scrape_with_ddinstagram(self, url_info: Dict[str, str]) -> Optional[Dict[str, Any]]:
+        """Scrapes via public mirror proxies (ddinstagram, vxinstagram)."""
+        shortcode = url_info["id"]
+        content_type = url_info["type"]
+        
+        # Mirror domains list to try in sequence
+        mirrors = ["ddinstagram.com", "vxinstagram.com"]
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        
+        for domain in mirrors:
+            # Construct the mirror URL
+            if content_type == "story":
+                dd_url = f"https://{domain}/stories/{url_info.get('username')}/{url_info.get('story_id')}"
+            elif content_type == "reel":
+                dd_url = f"https://{domain}/reel/{shortcode}/"
+            else:
+                dd_url = f"https://{domain}/p/{shortcode}/"
+                
+            try:
+                print(f"Fetching meta from mirror {domain}: {dd_url}")
+                res = requests.get(dd_url, headers=headers, timeout=12)
+                if res.status_code != 200:
+                    print(f"Mirror {domain} returned HTTP status: {res.status_code}")
+                    # Try fallback format with /reel/ instead of /p/ or /p/ instead of /reel/
+                    alt_url = f"https://{domain}/p/{shortcode}/" if content_type == "reel" else f"https://{domain}/reel/{shortcode}/"
+                    print(f"Retrying alternative URL on {domain}: {alt_url}")
+                    res = requests.get(alt_url, headers=headers, timeout=12)
+                    if res.status_code != 200:
+                        continue # Try the next mirror
+                
+                soup = BeautifulSoup(res.text, "html.parser")
+                
+                # Extract og:video / og:image meta tags
+                video_tags = soup.find_all("meta", property="og:video")
+                image_tags = soup.find_all("meta", property="og:image")
+                
+                twitter_video = soup.find("meta", name="twitter:player")
+                twitter_image = soup.find("meta", name="twitter:image")
+                
+                video_urls = []
+                image_urls = []
+                
+                for tag in video_tags:
+                    content = tag.get("content")
+                    if content and content not in video_urls:
+                        video_urls.append(content)
+                if twitter_video and twitter_video.get("content") and twitter_video["content"] not in video_urls:
+                    video_urls.append(twitter_video["content"])
+                    
+                for tag in image_tags:
+                    content = tag.get("content")
+                    if content and content not in image_urls:
+                        image_urls.append(content)
+                if twitter_image and twitter_image.get("content") and twitter_image["content"] not in image_urls:
+                    image_urls.append(twitter_image["content"])
+                    
+                if not video_urls and not image_urls:
+                    secure_video_tags = soup.find_all("meta", property="og:video:secure_url")
+                    for tag in secure_video_tags:
+                        content = tag.get("content")
+                        if content and content not in video_urls:
+                            video_urls.append(content)
+                            
+                # If still nothing, inspect pure tags or source elements
+                if not video_urls:
+                    for video_elem in soup.find_all("video"):
+                        src = video_elem.get("src")
+                        if src and src not in video_urls:
+                            video_urls.append(src)
+                    for source_elem in soup.find_all("source"):
+                        src = source_elem.get("src")
+                        if src and src not in video_urls:
+                            video_urls.append(src)
+                            
+                if not video_urls and not image_urls:
+                    print(f"No media elements found in mirror {domain} response. Trying next...")
+                    continue
+                    
+                # Parse user texts / description captions
+                title_tag = soup.find("meta", property="og:title") or soup.find("meta", name="twitter:title")
+                desc_tag = soup.find("meta", property="og:description") or soup.find("meta", name="twitter:description")
+                caption = desc_tag["content"] if desc_tag else (title_tag["content"] if title_tag else "")
+                
+                items = []
+                is_video = len(video_urls) > 0
+                
+                if is_video:
+                    thumbnail = image_urls[0] if image_urls else video_urls[0]
+                    detection_type = "video"
+                    items.append({
+                        "index": 0,
+                        "is_video": True,
+                        "url": video_urls[0],
+                        "thumbnail": thumbnail
+                    })
+                else:
+                    if len(image_urls) > 1:
+                        detection_type = "carousel"
+                        for idx, img_url in enumerate(image_urls):
+                            items.append({
+                                "index": idx,
+                                "is_video": False,
+                                "url": img_url,
+                                "thumbnail": img_url
+                            })
+                    else:
+                        detection_type = "image"
+                        thumbnail = image_urls[0] if image_urls else ""
+                        items.append({
+                            "index": 0,
+                            "is_video": False,
+                            "url": thumbnail,
+                            "thumbnail": thumbnail
+                        })
+                        
+                print(f"Mirror {domain} scraping successful! Found {len(items)} media nodes.")
+                return {
+                    "id": shortcode,
+                    "type": detection_type,
+                    "original_type": content_type,
+                    "caption": caption or "Successfully prepared ReelVault transit envelope.",
+                    "owner": "instagram_user",
+                    "timestamp": int(time.time()),
+                    "items": items,
+                    "fallback_active": False
+                }
+            except Exception as e:
+                print(f"Mirror {domain} extraction failed: {e}. Trying next...")
+                continue
+                
+        return None
+
     def scrape_with_html_tags(self, url: str) -> Optional[Dict[str, Any]]:
         """HTML parser scrape using og metadata tags as fallback."""
         headers = {
@@ -259,8 +395,16 @@ class InstagramScraper:
         try:
             return self.scrape_with_instaloader(url_info)
         except Exception as e:
-            print(f"Scraper Method 1 (Instaloader) failed: {e}. Trying Method 2 (HTML tags)...")
+            print(f"Scraper Method 1 (Instaloader) failed: {e}. Trying Method 1.5 (DDInstagram mirror)...")
             
+        # Try method 1.5: DDInstagram mirror proxy
+        try:
+            dd_result = self.scrape_with_ddinstagram(url_info)
+            if dd_result:
+                return dd_result
+        except Exception as dd_err:
+            print(f"Scraper Method 1.5 (DDInstagram) failed: {dd_err}. Trying Method 2 (HTML tags)...")
+
         # Try method 2: Open graph tags head parsing
         html_scraped = self.scrape_with_html_tags(url)
         if html_scraped:
@@ -268,7 +412,7 @@ class InstagramScraper:
             
         # Try method 3: Safe Simulated Transit fallbacks (essential for shared sandbox hosting IPs)
         if settings.ALLOW_FALLBACK:
-            print("Both crawlers blocked by Instagram's firewalls. Spawning simulated container fallback.")
+            print("All micro-crawlers blocked by Instagram's firewalls. Spawning simulated container fallback.")
             return self.generate_visually_stunning_mock_media(url, url_info)
             
         raise Exception("Failed to extract media. Private profile detection or server rate limit reached.")
