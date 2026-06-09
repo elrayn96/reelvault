@@ -29,13 +29,14 @@ async def process_media_download(
 ) -> Tuple[str, str, str]:
     """
     Downloads media segments, compresses if selected, and packages into a ZIP if multi-file.
+    Handles both .mp4 video files and image files, with proper ZIP packaging.
     Returns: (output_filepath, filename_to_user, mimetype)
     """
     cleanup_old_files()
     
     items = media_data.get("items", [])
     media_id = media_data.get("id", "reelvault")
-    media_type = media_data.get("type", "image")
+    media_type = media_data.get("type", "image")  # "video", "image", or "carousel"
     
     if not items:
         raise ValueError("No download items detected in parsed post.")
@@ -47,8 +48,13 @@ async def process_media_download(
     # Stage 1: Download segment by segment
     for idx, item in enumerate(items):
         item_url = item["url"]
-        is_video = item["is_video"]
-        ext = "mp4" if is_video else "jpg"
+        is_video = item.get("is_video", False)
+        
+        # Determine proper file extension based on whether it's video
+        if is_video:
+            ext = "mp4"
+        else:
+            ext = "jpg"
         
         step_progress = (idx / total_steps) * 45.0
         await manager.send_progress(
@@ -102,6 +108,11 @@ async def process_media_download(
             try:
                 response = requests.get(target_url, headers=req_headers, stream=True, timeout=15)
                 if response.status_code == 200:
+                    content_type = response.headers.get("Content-Type", "")
+                    if "text/html" in content_type:
+                        print(f"[Downloader] Attempt {config_idx+1} returned HTML, skipping...")
+                        last_error = "Received HTML error page instead of media"
+                        continue
                     with open(temp_path, 'wb') as f:
                         for chunk in response.iter_content(chunk_size=8192):
                             if chunk:
@@ -121,6 +132,9 @@ async def process_media_download(
             try:
                 response = requests.get(fallback_url, stream=True, timeout=15)
                 response.raise_for_status()
+                content_type = response.headers.get("Content-Type", "")
+                if "text/html" in content_type:
+                    raise ValueError("Received HTML error page instead of media from fallback")
                 with open(temp_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
@@ -216,13 +230,23 @@ async def process_media_download(
     else:
         # Single file download directly
         target_path, segment_name = processed_files[0]
-        ext = "mp4" if media_type == "video" else "jpg"
+        
+        # Determine file type based on media data and item
+        first_item = items[0] if items else {}
+        is_video = first_item.get("is_video", media_type == "video")
+        
+        if is_video:
+            ext = "mp4"
+            mimetype = "video/mp4"
+        else:
+            ext = "jpg"
+            mimetype = "image/jpeg"
+        
         final_filename = f"ReelVault_{media_id}_{uuid.uuid4().hex[:4]}.{ext}"
         
         # Rename target path to fit final readable name
         final_path = os.path.join(settings.TEMP_DIR, final_filename)
         os.rename(target_path, final_path)
         
-        mimetype = "video/mp4" if media_type == "video" else "image/jpeg"
         await manager.send_progress(client_id, status="File compilation finalized!", progress=100.0, stage="completed")
         return final_path, final_filename, mimetype

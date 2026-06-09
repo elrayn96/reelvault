@@ -105,7 +105,7 @@ function extractTypeAndShortcode(url: string): UrlInfo {
   try {
     const cleaned = cleanInstagramUrl(url);
     const pMatch = cleaned.match(/\/p\/([a-zA-Z0-9_\-]+)/);
-    const reelMatch = cleaned.match(/\/reel\/([a-zA-Z0-9_\-]+)/);
+    const reelMatch = cleaned.match(/\/reels?\/([a-zA-Z0-9_\-]+)/);  // Matches both /reel/ and /reels/
     const storyMatch = cleaned.match(/\/stories\/([a-zA-Z0-9_\-\.]+)\/([0-9]+)/);
     const tvMatch = cleaned.match(/\/tv\/([a-zA-Z0-9_\-]+)/);
     
@@ -436,57 +436,37 @@ app.post("/api/analyze", async (req, res) => {
   
   if (hasPython && hasFastapi) {
     try {
+      // CRITICAL: Use longer timeout to allow Python to scrape Instagram
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 45000); // 45 second timeout
+      
       const response = await fetch("http://127.0.0.1:8000/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, client_id })
+        body: JSON.stringify({ url, client_id }),
+        signal: controller.signal
       });
+      
+      clearTimeout(timeoutId);
       
       if (response.ok) {
         const data = await response.json();
+        log(`FastAPI analyze success: got ${data.items?.length || 0} items`);
         return res.json(data);
       } else {
         const errData = await response.json().catch(() => ({}));
-        log(`FastAPI raw analyze fail: ${JSON.stringify(errData)}`);
+        log(`FastAPI returned HTTP ${response.status}: ${JSON.stringify(errData)}`);
+        return res.status(response.status).json(errData);
       }
     } catch (err) {
-      log(`FastAPI analyze link failed: ${(err as Error).message}`);
+      const errMsg = (err as Error).message;
+      log(`FastAPI analyze error (${errMsg}). NOT falling back to mock data - returning error.`);
+      return res.status(503).json({ detail: `Backend service unavailable. Error: ${errMsg}` });
     }
+  } else {
+    log("Python environment not available - cannot process request");
+    return res.status(503).json({ detail: "Python backend not configured. Please ensure python3 and required packages are installed." });
   }
-  
-  // Local fallback engine pipeline
-  log("Python is offline/rate-limited by Instagram. Running secure Local Mock Fallback Pipeline...");
-  const sendProgress = (status: string, progress: number, stage: string, data?: any) => {
-    const ws = activeSockets.get(client_id);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "progress", status, progress, stage, data }));
-    }
-  };
-  
-  sendProgress("Connecting to Instagram nodes...", 15, "connecting");
-  await new Promise(r => setTimeout(r, 600));
-  sendProgress("Reading response streams safely...", 45, "downloading");
-  await new Promise(r => setTimeout(r, 600));
-  sendProgress("Parsing OpenGraph metadata objects...", 80, "processing");
-  await new Promise(r => setTimeout(r, 400));
-  
-  const urlInfo = extractTypeAndShortcode(url);
-  let finalData;
-  try {
-    const realData = await scrapeInstagramViaDd(url, urlInfo);
-    if (realData) {
-      finalData = realData;
-    }
-  } catch (err) {
-    log(`Scraping DDInstagram in fallback failed: ${err}`);
-  }
-  
-  if (!finalData) {
-    finalData = generateMockMedia(url, urlInfo);
-  }
-  
-  sendProgress(finalData.fallback_message || "Successfully fetched direct video/image metadata!", 100, "finalized", finalData);
-  res.json(finalData);
 });
 
 // 4. Main download package generator mapping
@@ -496,123 +476,36 @@ app.post("/api/download", async (req, res) => {
   
   if (hasPython && hasFastapi) {
     try {
+      // CRITICAL: Use longer timeout to allow Python to download and process media
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minute timeout for downloads
+      
       const response = await fetch("http://127.0.0.1:8000/api/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, compression, client_id })
+        body: JSON.stringify({ url, compression, client_id }),
+        signal: controller.signal
       });
+      
+      clearTimeout(timeoutId);
       
       if (response.ok) {
         const data = await response.json();
+        log(`FastAPI download success: ${data.filename}`);
         return res.json(data);
       } else {
         const errData = await response.json().catch(() => ({}));
-        log(`FastAPI raw download error: ${JSON.stringify(errData)}`);
+        log(`FastAPI download returned HTTP ${response.status}`);
+        return res.status(response.status).json(errData);
       }
     } catch (err) {
-      log(`FastAPI download link failed: ${(err as Error).message}`);
+      const errMsg = (err as Error).message;
+      log(`FastAPI download error (${errMsg}). NOT falling back - returning error.`);
+      return res.status(503).json({ detail: `Backend service unavailable. Error: ${errMsg}` });
     }
-  }
-  
-  // Local backup packager inside Node.js
-  log("Activating Node-based download packager...");
-  const sendProgress = (status: string, progress: number, stage: string) => {
-    const ws = activeSockets.get(client_id);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "progress", status, progress, stage }));
-    }
-  };
-  
-  sendProgress("Opening direct stream to download nodes...", 25, "downloading");
-  
-  const urlInfo = extractTypeAndShortcode(url);
-  let finalMediaData;
-  try {
-    const realData = await scrapeInstagramViaDd(url, urlInfo);
-    if (realData) {
-      finalMediaData = realData;
-    }
-  } catch (err) {
-    log(`Download scrape failed: ${err}`);
-  }
-  
-  if (!finalMediaData) {
-    finalMediaData = generateMockMedia(url, urlInfo);
-  }
-  
-  try {
-    sendProgress("Optimizing visual buffers...", 60, "compressing");
-    await new Promise(r => setTimeout(r, 400));
-    
-    const isCarousel = finalMediaData.items.length > 1;
-    
-    if (!isCarousel) {
-      sendProgress("Compiling media files safely...", 85, "packaging");
-      const item = finalMediaData.items[0];
-      const isVideo = item.is_video;
-      const ext = isVideo ? "mp4" : "jpg";
-      const filename = `reelvault_${finalMediaData.id}_${compression || "original"}.${ext}`;
-      const destPath = path.join(TEMP_DIR, filename);
-      
-      log(`Downloading single item directly from: ${item.url}`);
-      try {
-        const buffer = await downloadMediaBytes(item.url, isVideo);
-        fs.writeFileSync(destPath, buffer);
-      } catch (dlErr) {
-        log(`Single item stream diverted to mock default: ${(dlErr as Error).message}`);
-        const dummyBuffer = Buffer.alloc(1024 * 60);
-        fs.writeFileSync(destPath, dummyBuffer);
-      }
-      
-      const download_url = `/api/download-file?token=${encodeURIComponent(filename)}`;
-      const mimetype = isVideo ? "video/mp4" : "image/jpeg";
-      
-      sendProgress("Vault compilation successful!", 100, "completed");
-      
-      res.json({
-        success: true,
-        filename: filename,
-        mimetype: mimetype,
-        download_url: download_url
-      });
-    } else {
-      sendProgress("Packaging assets into secure zip layers...", 85, "packaging");
-      const zip = new AdmZip();
-      
-      for (const item of finalMediaData.items) {
-        const ext = item.is_video ? "mp4" : "jpg";
-        const entryName = `media_${item.index + 1}.${ext}`;
-        log(`Downloading carousel node: ${item.url}`);
-        try {
-          const buffer = await downloadMediaBytes(item.url, item.is_video);
-          zip.addFile(entryName, buffer);
-        } catch (dlErr) {
-          log(`Carousel node stream diverted to mock default: ${(dlErr as Error).message}`);
-          const dummyBuffer = Buffer.alloc(1024 * 60);
-          zip.addFile(entryName, dummyBuffer);
-        }
-      }
-      
-      const zipFilename = `reelvault_${finalMediaData.id}_${compression || "original"}.zip`;
-      const destPath = path.join(TEMP_DIR, zipFilename);
-      zip.writeZip(destPath);
-      
-      const download_url = `/api/download-file?token=${encodeURIComponent(zipFilename)}`;
-      
-      sendProgress("Vault compilation successful!", 100, "completed");
-      
-      res.json({
-        success: true,
-        filename: zipFilename,
-        mimetype: "application/zip",
-        download_url: download_url
-      });
-    }
-  } catch (err) {
-    const msg = (err as Error).message;
-    log(`Local compiler trace failed: ${msg}`);
-    sendProgress(`Download error: ${msg}`, 0, "error");
-    res.status(400).json({ detail: `Local downloader compression failure: ${msg}` });
+  } else {
+    log("Python environment not available - cannot process download");
+    return res.status(503).json({ detail: "Python backend not configured." });
   }
 });
 

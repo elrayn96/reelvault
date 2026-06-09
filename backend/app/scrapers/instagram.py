@@ -31,12 +31,12 @@ def extract_type_and_shortcode(url: str) -> Dict[str, str]:
     
     # Match patterns:
     # 1. /p/SHORTCODE/
-    # 2. /reel/SHORTCODE/
+    # 2. /reel/SHORTCODE/ or /reels/SHORTCODE/
     # 3. /stories/USERNAME/STORY_ID/
     # 4. /tv/SHORTCODE/
     
     p_match = re.search(r"/p/([a-zA-Z0-9_\-]+)", cleaned)
-    reel_match = re.search(r"/reel/([a-zA-Z0-9_\-]+)", cleaned)
+    reel_match = re.search(r"/reels?/([a-zA-Z0-9_\-]+)", cleaned)
     story_match = re.search(r"/stories/([a-zA-Z0-9_\-\.]+)/([0-9]+)", cleaned)
     tv_match = re.search(r"/tv/([a-zA-Z0-9_\-]+)", cleaned)
     
@@ -60,7 +60,7 @@ def extract_type_and_shortcode(url: str) -> Dict[str, str]:
 class InstagramScraper:
     def __init__(self):
         self.loader = instaloader.Instaloader(
-            max_connection_attempts=1,
+            max_connection_attempts=2,
             quiet=True,
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
@@ -106,8 +106,8 @@ class InstagramScraper:
                 items.append({
                     "index": 0,
                     "is_video": is_video,
-                    "url": post.video_url if is_video else post.display_url,
-                    "thumbnail": post.display_url
+                    "url": post.video_url if is_video else post.url,
+                    "thumbnail": post.url
                 })
                 
             return {
@@ -131,7 +131,7 @@ class InstagramScraper:
         content_type = url_info["type"]
         
         # Mirror domains list to try in sequence
-        mirrors = ["ddinstagram.com", "vxinstagram.com"]
+        mirrors = ["vxinstagram.com", "ddinstagram.com"]
         
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -149,13 +149,13 @@ class InstagramScraper:
                 
             try:
                 print(f"Fetching meta from mirror {domain}: {dd_url}")
-                res = requests.get(dd_url, headers=headers, timeout=12)
+                res = requests.get(dd_url, headers=headers, timeout=5)
                 if res.status_code != 200:
                     print(f"Mirror {domain} returned HTTP status: {res.status_code}")
                     # Try fallback format with /reel/ instead of /p/ or /p/ instead of /reel/
                     alt_url = f"https://{domain}/p/{shortcode}/" if content_type == "reel" else f"https://{domain}/reel/{shortcode}/"
                     print(f"Retrying alternative URL on {domain}: {alt_url}")
-                    res = requests.get(alt_url, headers=headers, timeout=12)
+                    res = requests.get(alt_url, headers=headers, timeout=5)
                     if res.status_code != 200:
                         continue # Try the next mirror
                 
@@ -165,8 +165,8 @@ class InstagramScraper:
                 video_tags = soup.find_all("meta", property="og:video")
                 image_tags = soup.find_all("meta", property="og:image")
                 
-                twitter_video = soup.find("meta", name="twitter:player")
-                twitter_image = soup.find("meta", name="twitter:image")
+                twitter_video = soup.find("meta", attrs={"name": "twitter:player"})
+                twitter_image = soup.find("meta", attrs={"name": "twitter:image"})
                 
                 video_urls = []
                 image_urls = []
@@ -208,8 +208,8 @@ class InstagramScraper:
                     continue
                     
                 # Parse user texts / description captions
-                title_tag = soup.find("meta", property="og:title") or soup.find("meta", name="twitter:title")
-                desc_tag = soup.find("meta", property="og:description") or soup.find("meta", name="twitter:description")
+                title_tag = soup.find("meta", property="og:title") or soup.find("meta", attrs={"name": "twitter:title"})
+                desc_tag = soup.find("meta", property="og:description") or soup.find("meta", attrs={"name": "twitter:description"})
                 caption = desc_tag["content"] if desc_tag else (title_tag["content"] if title_tag else "")
                 
                 items = []
