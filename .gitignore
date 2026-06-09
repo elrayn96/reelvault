@@ -6,7 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
-a.py
 backend/app/websocket/__pycache__
 backend/app/__pycache__
 backend/app/api/__pycache__
